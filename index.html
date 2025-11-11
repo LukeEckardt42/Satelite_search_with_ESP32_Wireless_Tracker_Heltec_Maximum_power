@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <title>CSV Sky-Plot Visualisierung (v3 - Legende)</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background-color: #000;
+            color: #fff;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+        #controls {
+            padding: 15px;
+            background-color: #1a1a1a;
+            border-bottom: 1px solid #333;
+            text-align: center;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        #info-bar {
+            padding: 5px 15px;
+            font-family: 'Courier New', Courier, monospace;
+            background-color: #111;
+        }
+        #canvas-container {
+            flex-grow: 1;
+            position: relative; /* Wichtig für Legende */
+        }
+        #label-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        .label-text {
+            color: #fff;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 14px;
+            padding: 2px 4px;
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 2px;
+            text-shadow: 0 0 3px #000;
+        }
+        button {
+            padding: 5px 10px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+
+        /* --- NEU: STYLES FÜR LEGENDE --- */
+        #legend {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 100; /* Über dem Canvas */
+            font-family: 'Courier New', Courier, monospace;
+            border: 1px solid #333;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+        .legend-item:last-child {
+            margin-bottom: 0;
+        }
+        .legend-color {
+            width: 15px;
+            height: 15px;
+            margin-right: 8px;
+            border: 1px solid #555;
+        }
+        .legend-flag {
+            margin-right: 8px;
+            font-size: 16px; /* Emojis größer machen */
+        }
+        #legend strong {
+            font-size: 15px;
+            color: #00ffff;
+        }
+        #legend hr {
+            border-color: #333; 
+            margin: 5px 0 8px 0;
+            border-style: solid;
+        }
+        /* --- ENDE NEUE STYLES --- */
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/renderers/CSS2DRenderer.js"></script>
+</head>
+<body>
+
+    <div id="controls">
+        <label for="csv-upload">1. CSV laden:</label>
+        <input type="file" id="csv-upload" accept=".csv">
+        <button id="play-pause-btn">Play</button>
+        <label for="speed-slider">Speed:</label>
+        <input type="range" id="speed-slider" min="1" max="60" value="1">
+        <span id="speed-display">1x</span>
+        <label for="time-slider">Zeit:</label>
+        <input type="range" id="time-slider" min="0" max="0" value="0" style="width: 30%;">
+    </div>
+    
+    <div id="info-bar">
+        Timestamp: <span id="timestamp-display">--:--:--</span> | Satelliten (sichtbar): <span id="sat-count-display">0</span>
+    </div>
+
+    <div id="canvas-container">
+        <div id="label-container"></div>
+        <div id="legend"></div>
+    </div>
+
+    <script>
+        // ===================================================================
+        // GLOBALE VARIABLEN
+        // ===================================================================
+        let scene, camera, renderer, labelRenderer;
+        let timestamps = []; 
+        let satGroup = new THREE.Group(); 
+        let gridGroup = new THREE.Group(); 
+
+        let satelliteVisuals = new Map(); 
+        let isPaused = true;
+        let playbackSpeed = 1; 
+        let timeAccumulator = 0;
+        let clock = new THREE.Clock();
+
+        const canvasContainer = document.getElementById('canvas-container');
+        const labelContainer = document.getElementById('label-container');
+        const fileInput = document.getElementById('csv-upload');
+        const slider = document.getElementById('time-slider');
+        const timestampDisplay = document.getElementById('timestamp-display');
+        const satCountDisplay = document.getElementById('sat-count-display');
+        const playPauseBtn = document.getElementById('play-pause-btn');
+        const speedSlider = document.getElementById('speed-slider');
+        const speedDisplay = document.getElementById('speed-display');
+
+        const PLOT_RADIUS = 100;
+
+        // ===================================================================
+        // INITIALISIERUNG
+        // ===================================================================
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x000000);
+
+            const aspect = canvasContainer.clientWidth / canvasContainer.clientHeight;
+            const viewHeight = PLOT_RADIUS * 2.5;
+            const viewWidth = viewHeight * aspect;
+            camera = new THREE.OrthographicCamera(-viewWidth / 2, viewWidth / 2, viewHeight / 2, -viewHeight / 2, 1, 1000);
+            camera.position.set(0, 0, 10);
+            camera.lookAt(0, 0, 0);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(canvasContainer.clientWidth, canvasContainer.clientHeight);
+            canvasContainer.appendChild(renderer.domElement);
+
+            labelRenderer = new THREE.CSS2DRenderer();
+            labelRenderer.setSize(canvasContainer.clientWidth, canvasContainer.clientHeight);
+            labelContainer.appendChild(labelRenderer.domElement);
+
+            scene.add(gridGroup);
+            scene.add(satGroup);
+
+            drawGrid();
+            
+            // NEU: Legende beim Start erstellen
+            createLegend();
+
+            // Event Listeners
+            fileInput.addEventListener('change', handleFileUpload);
+            slider.addEventListener('input', handleSliderChange);
+            playPauseBtn.addEventListener('click', togglePlayPause);
+            speedSlider.addEventListener('input', handleSpeedChange);
+            window.addEventListener('resize', onWindowResize);
+
+            animate();
+        }
+
+        // ===================================================================
+        // DATENVERARBEITUNG (CSV-PARSER)
+        // ===================================================================
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            timestamps = [];
+            satelliteVisuals.forEach(visual => {
+                satGroup.remove(visual.mesh);
+                satGroup.remove(visual.label);
+            });
+            satelliteVisuals.clear();
+            slider.value = 0;
+            slider.max = 0;
+            isPaused = true;
+            playPauseBtn.textContent = "Play";
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                const text = e.target.result;
+                parseCSV(text);
+            };
+            reader.readAsText(file);
+        }
+
+        function parseCSV(csvText) {
+            const lines = csvText.split('\n');
+            const dataMap = new Map();
+            let headerSkipped = false;
+
+            lines.forEach(line => {
+                if (!line || (!headerSkipped && line.startsWith('PC_Timestamp'))) {
+                    headerSkipped = true;
+                    return; 
+                }
+                const parts = line.split(',');
+                if (parts.length < 6) return;
+                const fullTimestamp = parts[0].trim();
+                const timestampKey = fullTimestamp.split('.')[0];
+                if (!timestampKey) return;
+
+                const sat = {
+                    system: parts[1].trim(),
+                    id: parts[2].trim(),
+                    elev: parseFloat(parts[3]),
+                    azim: parseFloat(parts[4]),
+                    snr: parts[5].trim()
+                };
+                
+                if (isNaN(sat.elev) || isNaN(sat.azim)) return;
+
+                if (!dataMap.has(timestampKey)) {
+                    dataMap.set(timestampKey, new Map()); 
+                }
+                dataMap.get(timestampKey).set(sat.id, sat);
+            });
+
+            timestamps = Array.from(dataMap.entries())
+                .map(([time, satelliteMap]) => ({ 
+                    time, 
+                    satellites: Array.from(satelliteMap.values())
+                 }))
+                .sort((a, b) => a.time.localeCompare(b.time));
+
+            slider.max = timestamps.length - 1;
+            drawTimestamp(0); 
+        }
+
+        // ===================================================================
+        // VISUALISIERUNG & PLOTTING
+        // ===================================================================
+
+        function drawGrid() {
+            gridGroup.clear(); 
+            const material = new THREE.LineBasicMaterial({ color: 0x444444 });
+            [30, 60, 90].forEach(elev => {
+                const radius = (1.0 - elev / 90.0) * PLOT_RADIUS;
+                const geometry = new THREE.BufferGeometry().setFromPoints(
+                    new THREE.Path().absarc(0, 0, radius, 0, Math.PI * 2).getPoints(64)
+                );
+                const circle = new THREE.LineLoop(geometry, material);
+                gridGroup.add(circle);
+            });
+            const lineGeometry = new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(0, PLOT_RADIUS, 0), new THREE.Vector3(0, -PLOT_RADIUS, 0),
+                new THREE.Vector3(PLOT_RADIUS, 0, 0), new THREE.Vector3(-PLOT_RADIUS, 0, 0)
+            ]);
+            gridGroup.add(new THREE.LineSegments(lineGeometry, material));
+            
+            const labelStyle = { color: '#888', fontSize: '16px', fontFamily: 'Courier New' };
+            createLabel('N', 0, PLOT_RADIUS + 5, labelStyle, gridGroup);
+            createLabel('S', 0, -PLOT_RADIUS - 10, labelStyle, gridGroup);
+            createLabel('E', PLOT_RADIUS + 5, 0, labelStyle, gridGroup);
+            createLabel('W', -PLOT_RADIUS - 15, 0, labelStyle, gridGroup);
+        }
+
+        // --- NEUE FUNKTION ZUM ERSTELLEN DER LEGENDE ---
+        function createLegend() {
+            const legendDiv = document.getElementById('legend');
+            const systems = [
+                { name: 'GPS (USA)', flag: '🇺🇸', colorKey: 'GPS' },
+                { name: 'GLONASS (Russ.)', flag: '🇷🇺', colorKey: 'GLONASS' },
+                { name: 'BeiDou (China)', flag: '🇨🇳', colorKey: 'BeiDou' },
+                { name: 'Galileo (EU)', flag: '🇪🇺', colorKey: 'Galileo' },
+                { name: 'Andere', flag: '🛰️', colorKey: 'Other' } // Fallback
+            ];
+
+            let html = '<strong>Legende</strong><hr>';
+            systems.forEach(sys => {
+                // Hex-Farbcode in einen CSS-String umwandeln (z.B. 0xff0000 -> "ff0000")
+                const colorHex = getSatColor(sys.colorKey).toString(16).padStart(6, '0');
+                
+                html += `
+                    <div class="legend-item">
+                        <span class="legend-flag">${sys.flag}</span>
+                        <div class="legend-color" style="background-color: #${colorHex};"></div>
+                        <span>${sys.name}</span>
+                    </div>
+                `;
+            });
+            legendDiv.innerHTML = html;
+        }
+
+        function createLabel(text, x, y, style, parent) {
+            const div = document.createElement('div');
+            div.className = 'label-text';
+            div.textContent = text;
+            if (style) Object.assign(div.style, style);
+            const label = new THREE.CSS2DObject(div);
+            label.position.set(x, y, 0);
+            parent.add(label);
+            return label;
+        }
+
+        function handleSliderChange(event) {
+            if (!isPaused) togglePlayPause();
+            drawTimestamp(parseInt(slider.value));
+        }
+
+        function handleSpeedChange(event) {
+            playbackSpeed = parseInt(event.target.value);
+            speedDisplay.textContent = `${playbackSpeed}x`;
+        }
+
+        function togglePlayPause() {
+            isPaused = !isPaused;
+            playPauseBtn.textContent = isPaused ? "Play" : "Pause";
+            clock.getDelta(); 
+        }
+        
+        function convertToXY(azim, elev) {
+            const angleRad = THREE.MathUtils.degToRad(azim - 90);
+            const radius = (1.0 - elev / 90.0) * PLOT_RADIUS;
+            const x = radius * Math.cos(angleRad);
+            const y = radius * Math.sin(angleRad);
+            return [x, y];
+        }
+
+        // ===================================================================
+        // KERNLOGIK: ZEITSTEMPEL ZEICHNEN
+        // ===================================================================
+        function drawTimestamp(index) {
+            if (index < 0 || index >= timestamps.length) return;
+
+            const data = timestamps[index];
+            timestampDisplay.textContent = data.time;
+
+            data.satellites.forEach(sat => {
+                if (sat.elev <= 0) {
+                    if (satelliteVisuals.has(sat.id)) {
+                        const visual = satelliteVisuals.get(sat.id);
+                        satGroup.remove(visual.mesh);
+                        satGroup.remove(visual.label);
+                        satelliteVisuals.delete(sat.id);
+                    }
+                } 
+                else {
+                    const [x, y] = convertToXY(sat.azim, sat.elev);
+                    
+                    // --- HIER IST DIE ÄNDERUNG ---
+                    const labelText = sat.id; // Nur noch die ID, kein SNR
+                    // --- ENDE ÄNDERUNG ---
+
+                    if (satelliteVisuals.has(sat.id)) {
+                        const visual = satelliteVisuals.get(sat.id);
+                        visual.mesh.position.set(x, y, 0);
+                        visual.label.position.set(x, y + 4, 0); 
+                        visual.label.element.textContent = labelText;
+                    } else {
+                        const geometry = new THREE.CircleGeometry(2, 16);
+                        const material = new THREE.MeshBasicMaterial({ color: getSatColor(sat.system) });
+                        const satMesh = new THREE.Mesh(geometry, material);
+                        satMesh.position.set(x, y, 0);
+                        
+                        const label = createLabel(labelText, x, y + 4, null, satGroup);
+                        
+                        satGroup.add(satMesh);
+                        satelliteVisuals.set(sat.id, { mesh: satMesh, label: label });
+                    }
+                }
+            });
+            
+            satCountDisplay.textContent = satelliteVisuals.size;
+        }
+
+        function getSatColor(system) {
+            if (system.startsWith('GPS')) return 0x00ff00; // Grün
+            if (system.startsWith('GLONASS')) return 0xff0000; // Rot
+            if (system.startsWith('BeiDou')) return 0x0000ff; // Blau
+            if (system.startsWith('Galileo')) return 0xffff00; // Gelb
+            return 0xffffff; // Weiß (Fallback)
+        }
+
+        // ===================================================================
+        // RENDER-SCHLEIFE & RESIZE
+        // ===================================================================
+
+        function animate() {
+            requestAnimationFrame(animate); 
+
+            const deltaTime = clock.getDelta();
+
+            if (!isPaused && timestamps.length > 0) {
+                timeAccumulator += deltaTime;
+                const timePerFrame = 1.0 / playbackSpeed; 
+
+                while (timeAccumulator >= timePerFrame) {
+                    timeAccumulator -= timePerFrame;
+                    
+                    let newIndex = parseInt(slider.value) + 1;
+                    if (newIndex >= timestamps.length) {
+                        newIndex = 0; 
+                    }
+                    
+                    slider.value = newIndex; 
+                    drawTimestamp(newIndex); 
+                }
+            }
+
+            renderer.render(scene, camera);
+            labelRenderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            const aspect = canvasContainer.clientWidth / canvasContainer.clientHeight;
+            const viewHeight = PLOT_RADIUS * 2.5;
+            const viewWidth = viewHeight * aspect;
+            camera.left = -viewWidth / 2;
+            camera.right = viewWidth / 2;
+            camera.top = viewHeight / 2;
+            camera.bottom = -viewHeight / 2;
+            camera.updateProjectionMatrix();
+            renderer.setSize(canvasContainer.clientWidth, canvasContainer.clientHeight);
+            labelRenderer.setSize(canvasContainer.clientWidth, canvasContainer.clientHeight);
+        }
+
+        // Starten
+        init();
+    </script>
+</body>
+</html>
